@@ -1,0 +1,89 @@
+     1                                  [org 0x7C00]                    ; BIOS loads boot sector at physical address 0x7C00
+     2                                  [bits 16]                       ; CPU starts in 16-bit Real Mode
+     3                                  
+     4                                  _start:
+     5 00000000 FA                          cli                         ; 1. Disable hardware interrupts during mode switch
+     6 00000001 31C0                        xor ax, ax
+     7 00000003 8ED8                        mov ds, ax                  ; Zero Data Segment
+     8 00000005 8EC0                        mov es, ax                  ; Zero Extra Segment
+     9 00000007 8ED0                        mov ss, ax                  ; Zero Stack Segment
+    10 00000009 BC007C                      mov sp, 0x7C00              ; Grow stack downward from 0x7C00
+    11                                  
+    12 0000000C 0F0116[3800]                lgdt [gdt_descriptor]       ; 2. Load Global Descriptor Table register
+    13                                  
+    14 00000011 0F20C0                      mov eax, cr0                ; 3. Set Bit 0 (PE - Protection Enable) in CR0
+    15 00000014 6683C801                    or eax, 0x1
+    16 00000018 0F22C0                      mov cr0, eax
+    17                                  
+    18 0000001B EA[3E00]0800                jmp 0x08:init_pm            ; 4. Far jump into 32-bit Code Segment (Selector 0x08)
+    19                                  
+    20                                  ; -----------------------------------------------------------------------------
+    21                                  ; Global Descriptor Table (Flat 4GB Code and Data Segments for Ring 0)
+    22                                  ; -----------------------------------------------------------------------------
+    23                                  align 8
+    24                                  gdt_start:
+    25 00000020 0000000000000000            dq 0x0000000000000000       ; Null Descriptor (Required at index 0)
+    26                                  gdt_code:
+    27 00000028 FFFF                        dw 0xFFFF                   ; Limit (bits 0-15)
+    28 0000002A 0000                        dw 0x0000                   ; Base (bits 0-15)
+    29 0000002C 00                          db 0x00                     ; Base (bits 16-23)
+    30 0000002D 9A                          db 10011010b                ; Access: Present, Ring 0, Code, Executable, Readable
+    31 0000002E CF                          db 11001111b                ; Flags: 4KB Granularity, 32-bit + Limit (bits 16-19)
+    32 0000002F 00                          db 0x00                     ; Base (bits 24-31)
+    33                                  gdt_data:
+    34 00000030 FFFF0000                    dw 0xFFFF, 0x0000
+    35 00000034 0092CF00                    db 0x00, 10010010b, 11001111b, 0x00 ; Access: Ring 0 Data, Writable
+    36                                  gdt_end:
+    37                                  
+    38                                  gdt_descriptor:
+    39 00000038 1700                        dw gdt_end - gdt_start - 1  ; 16-bit Size of GDT minus 1
+    40 0000003A [20000000]                  dd gdt_start                ; 32-bit Base Address of GDT
+    41                                  
+    42                                  ; -----------------------------------------------------------------------------
+    43                                  ; 32-Bit Protected Mode Kernel Entry
+    44                                  ; -----------------------------------------------------------------------------
+    45                                  [bits 32]
+    46                                  init_pm:
+    47 0000003E 66B81000                    mov ax, 0x10                ; 0x10 is our GDT Data Segment selector
+    48 00000042 8ED8                        mov ds, ax
+    49 00000044 8ED0                        mov ss, ax
+    50 00000046 8EC0                        mov es, ax
+    51 00000048 8EE0                        mov fs, ax
+    52 0000004A 8EE8                        mov gs, ax
+    53 0000004C BC00000900                  mov esp, 0x90000            ; Set 32-bit Ring 0 stack pointer at 0x90000
+    54                                  
+    55                                      ; 1. MMIO: Write "OS KERNEL ONLINE" directly to VGA RAM at 0xB8000
+    56 00000051 BF00800B00                  mov edi, 0xB8000            ; VGA Text Buffer physical address
+    57 00000056 BE[7E000000]                mov esi, msg_kernel         ; Source string pointer
+    58 0000005B B40A                        mov ah, 0x0A                ; Color attribute: Light Green (0xA) on Black (0x0)
+    59                                  
+    60                                  .vga_loop:
+    61 0000005D AC                          lodsb                       ; Load next byte from [ESI] into AL and increment ESI
+    62 0000005E 84C0                        test al, al                 ; Check for null terminator (0)
+    63 00000060 7408                        jz .serial_out
+    64 00000062 668907                      mov [edi], ax               ; Write 16-bit (Color:ASCII) directly to VGA MMIO
+    65 00000065 83C702                      add edi, 2                  ; Advance 2 bytes to next character cell
+    66 00000068 EBF3                        jmp .vga_loop
+    67                                  
+    68                                      ; 2. Port I/O: Send confirmation string to COM1 Serial Port (0x3F8)
+    69                                  .serial_out:
+    70 0000006A BE[7E000000]                mov esi, msg_kernel
+    71 0000006F 66BAF803                    mov dx, 0x3F8               ; COM1 UART data port address
+    72                                  .uart_loop:
+    73 00000073 AC                          lodsb
+    74 00000074 84C0                        test al, al
+    75 00000076 7403                        jz .halt_cpu
+    76 00000078 EE                          out dx, al                  ; Hardware Port I/O write directly to UART
+    77 00000079 EBF8                        jmp .uart_loop
+    78                                  
+    79                                  .halt_cpu:
+    80 0000007B F4                          hlt                         ; Put CPU into low-power sleep until next interrupt
+    81 0000007C EBFD                        jmp .halt_cpu
+    82                                  
+    83 0000007E 4F53204B45524E454C-     msg_kernel db "OS KERNEL ONLINE [RING 0]", 10, 0
+    83 00000087 204F4E4C494E45205B-
+    83 00000090 52494E4720305D0A00 
+    84                                  
+    85                                  ; Pad boot sector to 510 bytes and append the mandatory 0xAA55 BIOS boot signature
+    86 00000099 00<rep 165h>            times 510 - ($ - $$) db 0
+    87 000001FE 55AA                    dw 0xAA55
